@@ -1,16 +1,10 @@
 ﻿
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
-
 #include <stdio.h>
 #include <stdint.h>
 #include <math.h>
-
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
-
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "stb_image_write.h"
+#include <opencv2/opencv.hpp>
 
 #define CHANNEL_NUM 3
 
@@ -20,24 +14,14 @@ __global__ void doub_thresh(uint8_t* out_img, uint8_t* in_img,
     uint8_t lower_limit, uint8_t upper_limit,
     int width, int height);
 __global__ void thresh2lanes(uint8_t* red_roads_img, uint8_t* edges_img,
-                        int width, int height, int channels);
+    int width, int height, int channels);
 
-
-#include <chrono>
-#include <iostream>
-using namespace std;
-using namespace std::chrono;
+using namespace cv;
 
 int main()
 {
-    int width, height, channels;
-    uint8_t* rgb_in = stbi_load("test_images/test2.jpg", &width, &height, &channels, 0);
-    size_t rgb_size = width * height * CHANNEL_NUM * sizeof(uint8_t);
-    printf("%d %d %d\n", width, height, channels);
-
-    uint8_t * red_roads_out;
-    red_roads_out = (uint8_t*)malloc(width * height * CHANNEL_NUM);
-    size_t red_roads_size = rgb_size;
+    int width = 1280, height=720, channels = 3;
+    size_t rgb_size = width * height * channels * sizeof(uint8_t);
 
     uint8_t* gray_out;
     gray_out = (uint8_t*)malloc(width * height * 1);
@@ -47,36 +31,47 @@ int main()
     edges_out = (uint8_t*)malloc(width * height * 1);
     size_t edges_size = gray_size;
 
+    uint8_t* red_roads_out;
+    red_roads_out = (uint8_t*)malloc(width * height * CHANNEL_NUM);
+    size_t red_roads_size = rgb_size;
+
     uint8_t* d_rgb_in; uint8_t* d_gray_out; uint8_t* d_edges_out; uint8_t* d_red_roads_out;
     cudaMalloc((void**)&d_rgb_in, rgb_size);
     cudaMalloc((void**)&d_gray_out, gray_size);
     cudaMalloc((void**)&d_edges_out, edges_size);
     cudaMalloc((void**)&d_red_roads_out, red_roads_size);
 
-    cudaMemcpy(d_rgb_in, rgb_in, rgb_size, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_red_roads_out, rgb_in, red_roads_size, cudaMemcpyHostToDevice);
+    VideoCapture video;
+    video.open("project_video.mp4");
+    Mat frame; //mat object for storing data
+    for (;;) {
+        video >> frame;
+        // width = frame.size().width; width = frame.size().height;
+        uint8_t* rgb_in = frame.data;
+        
+        
 
-    dim3 dimGrid(ceil(width / 32.0), ceil(height / 32.0), 1);
-    dim3 dimBlock(32, 32, 1);
+        cudaMemcpy(d_rgb_in, rgb_in, rgb_size, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_red_roads_out, rgb_in, red_roads_size, cudaMemcpyHostToDevice);
 
-    auto start = high_resolution_clock::now();
+        dim3 dimGrid(ceil(width / 32.0), ceil(height / 32.0), 1);
+        dim3 dimBlock(32, 32, 1);
 
-    rgb2gray << <dimGrid, dimBlock >> > (d_gray_out, d_rgb_in, width, height, CHANNEL_NUM);
-    doub_thresh << <dimGrid, dimBlock >> > (d_edges_out, d_gray_out, 180, 250, width, height);
-    thresh2lanes << <dimGrid, dimBlock >> > (d_red_roads_out, d_edges_out, width, height, CHANNEL_NUM);
 
-    cudaMemcpy(gray_out, d_gray_out, gray_size, cudaMemcpyDeviceToHost);
-    cudaMemcpy(edges_out, d_edges_out, gray_size, cudaMemcpyDeviceToHost);
-    cudaMemcpy(red_roads_out, d_red_roads_out, red_roads_size, cudaMemcpyDeviceToHost);
+        rgb2gray << <dimGrid, dimBlock >> > (d_gray_out, d_rgb_in, width, height, CHANNEL_NUM);
+        doub_thresh << <dimGrid, dimBlock >> > (d_edges_out, d_gray_out, 175, 250, width, height);
+        thresh2lanes << <dimGrid, dimBlock >> > (d_red_roads_out, d_edges_out, width, height, CHANNEL_NUM);
 
-    auto stop = high_resolution_clock::now();
-    auto duration = duration_cast<microseconds>(stop - start);
-    cout << "Time: " << duration.count() << endl;
-    stbi_write_jpg("results/out.jpg", width, height, 1, gray_out, 100);
-    stbi_write_jpg("results/edges.jpg", width, height, 1, edges_out, 100);
-    stbi_write_jpg("results/red_lanes.jpg", width, height, CHANNEL_NUM, red_roads_out, 100);
-    
-    stbi_image_free(rgb_in);
+        cudaMemcpy(gray_out, d_gray_out, gray_size, cudaMemcpyDeviceToHost);
+        cudaMemcpy(edges_out, d_edges_out, gray_size, cudaMemcpyDeviceToHost);
+        cudaMemcpy(rgb_in, d_red_roads_out, red_roads_size, cudaMemcpyDeviceToHost);
+
+
+        imshow("frame", frame);
+        if (waitKey(30) > 0) {
+            break;
+        }
+    }
     free(gray_out);
     free(edges_out);
     free(red_roads_out);
@@ -85,12 +80,11 @@ int main()
     cudaFree(d_gray_out);
     cudaFree(d_edges_out);
     cudaFree(d_red_roads_out);
-
     return 0;
 }
 
-__global__ void rgb2gray(uint8_t * out_img, uint8_t * in_img, 
-                         int width, int height, int channels) {
+__global__ void rgb2gray(uint8_t* out_img, uint8_t* in_img,
+    int width, int height, int channels) {
     int row = blockDim.y * blockIdx.y + threadIdx.y;
     int col = blockDim.x * blockIdx.x + threadIdx.x;
 
@@ -107,9 +101,9 @@ __global__ void rgb2gray(uint8_t * out_img, uint8_t * in_img,
     }
 }
 
-__global__ void doub_thresh(uint8_t* out_img, uint8_t* in_img, 
-                            uint8_t lower_limit, uint8_t upper_limit, 
-                            int width, int height) {
+__global__ void doub_thresh(uint8_t* out_img, uint8_t* in_img,
+    uint8_t lower_limit, uint8_t upper_limit,
+    int width, int height) {
     int row = blockDim.y * blockIdx.y + threadIdx.y;
     int col = blockDim.x * blockIdx.x + threadIdx.x;
 
